@@ -139,6 +139,8 @@
                 Stop-PSFFunction -Message "Something went wrong creating the vhd" -ErrorRecord $_ -Continue
             }
         }
+
+        return (Get-VHD -Path $vhdPath)
     }
 
     end {
