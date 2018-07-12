@@ -1,7 +1,7 @@
 function Invoke-PSDCCleanup {
 
     param(
-        [object[]]$Item,
+        [object[]]$ItemList,
         [System.Management.Automation.PSCredential]
         $SqlCredential,
         [System.Management.Automation.PSCredential]
@@ -10,20 +10,31 @@ function Invoke-PSDCCleanup {
 
     begin {
         # Reverse the order of the items to run backwards
-        $cleanupItems = $Item | Sort-Object Number -Descending
+        $ItemList = $ItemList | Sort-Object Number -Descending
     }
 
     process {
+
         # Loop through each of the items
-        foreach ($item in $cleanupItems) {
+        foreach ($item in $ItemList) {
+
+            $computer = [PSFComputer]$item.Computer
+
             switch ($item.TypeName) {
                 "FileInfo" {
                     try {
-                        if (Test-Path -Path $item.Object.FullName) {
-                            Remove-Item -Path $item.Object.FullName
+                        Write-PSFMessage -Message "Removing file $($item.Object.Name)" -Level Verbose
+                        if ($computer.IsLocalhost) {
+                            if (Test-Path -Path $item.Object.FullName) {
+                                Remove-Item -Path $item.Object.FullName -Recurse -Force -Confirm:$false
+                            }
+                            else {
+                                Write-PSFMessage -Message "Object $($item.Object.FullName) doesn't exist" -Level Verbose
+                            }
                         }
                         else {
-                            Write-PSFMessage -Message "Object $($item.TypeName) cdoesn't exist" -Level Verbose
+                            $command = [scriptblock]::Create("Remove-Item -Path $($item.Object.FullName) -Recurse -Force -Confirm:$false")
+                            Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $Credential
                         }
                     }
                     catch {
@@ -33,24 +44,32 @@ function Invoke-PSDCCleanup {
 
                 "DirectoryInfo" {
                     try {
-                        if (Test-Path -Path $item.Object.FullName) {
-                            Remove-Item -Path $item.Object.FullName
+                        Write-PSFMessage -Message "Removing directory $($item.Object.Name)" -Level Verbose
+                        if ($computer.IsLocalhost) {
+                            if (Test-Path -Path $item.Object.FullName) {
+                                Remove-Item -Path $item.Object.FullName -Recurse -Force -Confirm:$false
+                            }
+                            else {
+                                Write-PSFMessage -Message "Object $($item.Object.FullName) doesn't exist" -Level Verbose
+                            }
                         }
                         else {
-                            Write-PSFMessage -Message "Object $($item.TypeName) cdoesn't exist" -Level Verbose
+                            $command = [scriptblock]::Create("Remove-Item -Path $($item.Object.FullName) -Recurse -Force -Confirm:$false")
+                            Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $Credential
                         }
+
                     }
                     catch {
 
                     }
                 }
 
-                "Database"{
+                "Database" {
                     $database = $item.Object
-                    try{
-                        Remove-DbaDatabase -SqlInstance $database.SqlInstance -Database $database.DatabaseName -SqlCredential $SqlCredential
+                    try {
+                        $null = Remove-DbaDatabase -SqlInstance $database.SqlInstance -Database $database.DatabaseName -SqlCredential $SqlCredential
                     }
-                    catch{
+                    catch {
 
                     }
                 }
@@ -60,24 +79,37 @@ function Invoke-PSDCCleanup {
                     $vhd = $item.Object
 
                     # Dismount the VHD if it's attched
-                    if ($vhd.Attached) {
-                        try {
-                            Dismount-VHD -Path $vhd.Path
+                    try {
+                        if ($vhd.Attached) {
+                            Write-PSFMessage -Message "Dismounting vhd $($vhd.Path)" -Level Verbose
+                            if ($computer.IsLocalhost) {
+                                Dismount-VHD -Path $vhd.Path
+                            }
+                            else {
+                                $command = [scriptblock]::Create("Dismount-VHD -Path $($vhd.Path)")
+                                Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $Credential
+                            }
                         }
-                        catch {
+                    }
+                    catch {
 
-                        }
                     }
 
                     # Remove the vhd
                     try {
-                        if (Test-Path -Path $i.Object.FullName) {
-                            Remove-Item -Path $vhd.Path
+                        Write-PSFMessage -Message "Removing vhd $($vhd.Path)" -Level Verbose
+                        if ($computer.IsLocalhost) {
+                            if (Test-Path -Path $i.Object.FullName) {
+                                Remove-Item -Path $vhd.Path -Force -Confirm:$false
+                            }
+                            else {
+                                Write-PSFMessage -Message "Object $($i.TypeName) doesn't exist" -Level Verbose
+                            }
                         }
                         else {
-                            Write-PSFMessage -Message "Object $($i.TypeName) cdoesn't exist" -Level Verbose
+                            $command = [scriptblock]::Create("Remove-Item -Path $($vhd.Path) -Recurse -Force -Confirm:$false")
+                            Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $Credential
                         }
-
                     }
                     catch {
 
