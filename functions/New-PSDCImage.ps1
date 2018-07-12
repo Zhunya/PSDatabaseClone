@@ -248,6 +248,9 @@
         # Set time stamp
         $timestamp = Get-Date -format "yyyyMMddHHmmss"
 
+        # Create array for cleanup items in case of error
+        $cleanupItems = @()
+
     }
 
     process {
@@ -271,7 +274,7 @@
                 $dbSizeMB = $db.Size
 
                 if ($availableMB -lt $dbSizeMB) {
-                    Stop-PSFFunction -Message "Size of database $($db.Name) does not fit within the image local path" -Target $db -Continue
+                    Stop-PSFFunction -Message "Size of database $($db.Name) does not fit within the image local path" -Target $db
                 }
             }
 
@@ -309,16 +312,32 @@
 
                     # Check if computer is local
                     if ($computer.IsLocalhost) {
-                        $null = New-PSDCVhdDisk -Destination $imagePath -FileName "$imageName.vhdx"
+                        $vhd = New-PSDCVhdDisk -Destination $imagePath -FileName "$imageName.vhdx" -EnableException
                     }
                     else {
-                        $command = [ScriptBlock]::Create("New-PSDCVhdDisk -Destination $imagePath -FileName '$imageName.vhdx'")
-                        $null = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
+                        $command = [ScriptBlock]::Create("New-PSDCVhdDisk -Destination `"$imagePath`" -FileName `"$imageName.vhdx`" -EnableException")
+                        $vhd = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
                     }
 
+                    # Add the item to the cleanup list
+                    $cleanupItems += [PSCustomObject]@{
+                        Number   = ($list.Count + 1)
+                        Computer = $computer.ComputerName
+                        TypeName = "VirtualHardDisk"
+                        TypeBase = $vhd.GetType().BaseType
+                        Object   = $vhd
+                    }
                 }
                 catch {
-                    Stop-PSFFunction -Message "Couldn't create vhd $imageName" -Target "$imageName.vhd" -ErrorRecord $_ -Continue
+                    # Try to clean up the items that were created
+                    try {
+                        Invoke-PSDCCleanup -ItemList $cleanupItems -SqlCredential $DestinationSqlCredential -Credential $DestinationCredential
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't clean up items" -Target $list -ErrorRecord $_ -Continue
+                    }
+
+                    Stop-PSFFunction -Message "Couldn't create vhd $imageName" -Target "$imageName.vhd" -ErrorRecord $_
                 }
             }
 
@@ -337,49 +356,97 @@
                     }
                 }
                 catch {
-                    Stop-PSFFunction -Message "Couldn't initialize vhd $vhdPath" -Target $imageName -ErrorRecord $_ -Continue
+                    # Try to clean up the items that were created
+                    try {
+                        Invoke-PSDCCleanup -ItemList $cleanupItems -SqlCredential $DestinationSqlCredential -Credential $DestinationCredential
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't clean up items" -Target $list -ErrorRecord $_ -Continue
+                    }
+
+                    Stop-PSFFunction -Message "Couldn't initialize vhd $vhdPath" -Target $imageName -ErrorRecord $_
                 }
             }
 
-            # try to create access path
-            try {
+            if ($PSCmdlet.ShouldProcess($accessPath, "Creating access path")) {
                 # Check if access path is already present
-                if (-not (Test-Path -Path $accessPath)) {
-                    if ($PSCmdlet.ShouldProcess($accessPath, "Creating access path $accessPath")) {
-                        try {
-                            # Check if computer is local
-                            if ($computer.IsLocalhost) {
-                                $null = New-Item -Path $accessPath -ItemType Directory -Force
+                try {
+                    # Check if computer is local
+                    if ($computer.IsLocalhost) {
+                        if (-not (Test-Path -Path $accessPath)) {
+                            if ($PSCmdlet.ShouldProcess($accessPath, "Creating access path $accessPath")) {
+                                $item = New-Item -Path $accessPath -ItemType Directory -Force
                             }
-                            else {
-                                $command = [ScriptBlock]::Create("New-Item -Path $accessPath -ItemType Directory -Force")
-                                $null = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
-                            }
-                        }
-                        catch {
-                            Stop-PSFFunction -Message "Couldn't create access path directory" -ErrorRecord $_ -Target $accessPath -Continue
                         }
                     }
+                    else {
+                        $command = [ScriptBlock]::Create("New-Item -Path $accessPath -ItemType Directory -Force")
+                        $item = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
+                    }
+
+                    # Add the item to the cleanup list
+                    $cleanupItems += [PSCustomObject]@{
+                        Number   = ($list.Count + 1)
+                        Computer = $computer.ComputerName
+                        TypeName = $item.GetType().Name
+                        TypeBase = $item.GetType().BaseType
+                        Object   = $item
+                    }
                 }
+                catch {
+                    # Try to clean up the items that were created
+                    try {
+                        Invoke-PSDCCleanup -ItemList $cleanupItems -SqlCredential $DestinationSqlCredential -Credential $DestinationCredential
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't clean up items" -Target $list -ErrorRecord $_ -Continue
+                    }
 
-                # Get the properties of the disk and partition
-                $disk = $diskResult.Disk
-                $partition = $diskResult.Partition
+                    Stop-PSFFunction -Message "Couldn't create access path $accessPath" -Target $accessPath -ErrorRecord $_
+                }
+            }
 
-                if ($PSCmdlet.ShouldProcess($accessPath, "Adding access path '$accessPath' to mounted disk")) {
+            # Get the properties of the disk and partition
+            $disk = $diskResult.Disk
+            $partition = $diskResult.Partition
+
+            if ($PSCmdlet.ShouldProcess($accessPath, "Adding access path '$accessPath' to mounted disk")) {
+                $cleanupItems
+                try {
                     # Add the access path to the mounted disk
                     if ($computer.IsLocalhost) {
                         $null = Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition[1].PartitionNumber -AccessPath $accessPath -ErrorAction SilentlyContinue
                     }
                     else {
-                        $command = [ScriptBlock]::Create("Add-PartitionAccessPath -DiskNumber $($disk.Number) -PartitionNumber $($partition[1].PartitionNumber) -AccessPath $accessPath -ErrorAction SilentlyContinue")
+                        $command = [ScriptBlock]::Create("Add-PartitionAccessPaths -DiskNumber $($disk.Number) -PartitionNumber $($partition[1].PartitionNumber) -AccessPath $accessPath -ErrorAction SilentlyContinue")
                         $null = Invoke-PSFCommand -ComputerName $computer -ScriptBlock $command -Credential $DestinationCredential
                     }
-                }
 
-            }
-            catch {
-                Stop-PSFFunction -Message "Couldn't create access path for partition" -ErrorRecord $_ -Target $diskResult.partition
+                    #######################
+                    ### Include the removal of the access path.
+                    # First get the disk, than the partition and then Remove-PartitionAccessPath
+                    # i.e Get-Volume -Drive $DriveLetter | Get-Partition | Remove-PartitionAccessPath -accesspath $accessPath
+
+                    # Add the item to the cleanup list
+                    $cleanupItems += [PSCustomObject]@{
+                        Number   = ($list.Count + 1)
+                        Computer = $computer.ComputerName
+                        TypeName = "VirtualHardDisk"
+                        TypeBase = $vhd.GetType().BaseType
+                        Object   = $disk
+                    }
+                }
+                catch {
+                    # Try to clean up the items that were created
+                    try {
+                        Invoke-PSDCCleanup -ItemList $cleanupItems -SqlCredential $DestinationSqlCredential -Credential $DestinationCredential
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't clean up items" -Target $list -ErrorRecord $_ -Continue
+                    }
+
+                    Stop-PSFFunction -Message "Couldn't mount access path to volume" -Target $accessPath -ErrorRecord $_
+                }
             }
 
             # # Create folder structure for image
@@ -440,8 +507,25 @@
                         -DatabaseName $tempDbName -Path $lastFullBackup `
                         -DestinationDataDirectory $imageDataFolder `
                         -DestinationLogDirectory $imageLogFolder
+
+                    # Add the item to the cleanup list
+                    $cleanupItems += [PSCustomObject]@{
+                        Number   = ($list.Count + 1)
+                        Computer = $computer.ComputerName
+                        TypeName = "Database"
+                        TypeBase = "DatabaseRestore"
+                        Object   = $restore
+                    }
                 }
                 catch {
+                    # Try to clean up the items that were created
+                    try {
+                        Invoke-PSDCCleanup -ItemList $cleanupItems -SqlCredential $DestinationSqlCredential -Credential $DestinationCredential
+                    }
+                    catch {
+                        Stop-PSFFunction -Message "Couldn't clean up items" -Target $list -ErrorRecord $_ -Continue
+                    }
+
                     Stop-PSFFunction -Message "Couldn't restore database $db as $tempDbName on $DestinationSqlInstance" -Target $restore -ErrorRecord $_ -Continue
                 }
             }
